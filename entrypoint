@@ -1,0 +1,170 @@
+#!/bin/bash
+
+set -e
+set -o pipefail
+set -x
+
+SOCAT_VERSION=1.7.3.4
+NCURSES_VERSION=6.2
+READLINE_VERSION=8.0
+OPENSSL_VERSION=1.1.1e
+ANDROID_API=21
+
+CC="$TARGET-gcc -static"
+
+# BS2000-OSD BSD-generic32 BSD-generic64 BSD-ia64 BSD-sparc64 BSD-sparcv8 
+# BSD-x86 BSD-x86-elf BSD-x86_64 Cygwin Cygwin-i386 Cygwin-i486 Cygwin-i586 
+# Cygwin-i686 Cygwin-x86 Cygwin-x86_64 DJGPP MPE/iX-gcc UEFI UWIN VC-CE VC-WIN32 
+# VC-WIN32-ARM VC-WIN32-ONECORE VC-WIN64-ARM VC-WIN64A VC-WIN64A-ONECORE 
+# VC-WIN64A-masm VC-WIN64I aix-cc aix-gcc aix64-cc aix64-gcc android-arm 
+# android-arm64 android-armeabi android-mips android-mips64 android-x86 
+# android-x86_64 android64 android64-aarch64 android64-mips64 android64-x86_64 
+# bsdi-elf-gcc cc darwin-i386-cc darwin-ppc-cc darwin64-ppc-cc 
+# darwin64-x86_64-cc gcc haiku-x86 haiku-x86_64 hpux-ia64-cc hpux-ia64-gcc 
+# hpux-parisc-cc hpux-parisc-gcc hpux-parisc1_1-cc hpux-parisc1_1-gcc 
+# hpux64-ia64-cc hpux64-ia64-gcc hpux64-parisc2-cc hpux64-parisc2-gcc hurd-x86 
+# ios-cross ios-xcrun ios64-cross ios64-xcrun iossimulator-xcrun iphoneos-cross 
+# irix-mips3-cc irix-mips3-gcc irix64-mips4-cc irix64-mips4-gcc linux-aarch64 
+# linux-alpha-gcc linux-aout linux-arm64ilp32 linux-armv4 linux-c64xplus 
+# linux-elf linux-generic32 linux-generic64 linux-ia64 linux-mips32 linux-mips64 
+# linux-ppc linux-ppc64 linux-ppc64le linux-sparcv8 linux-sparcv9 linux-x32 
+# linux-x86 linux-x86-clang linux-x86_64 linux-x86_64-clang linux32-s390x 
+# linux64-mips64 linux64-s390x linux64-sparcv9 mingw mingw64 nextstep 
+# nextstep3.3 sco5-cc sco5-gcc solaris-sparcv7-cc solaris-sparcv7-gcc 
+# solaris-sparcv8-cc solaris-sparcv8-gcc solaris-sparcv9-cc solaris-sparcv9-gcc 
+# solaris-x86-gcc solaris64-sparcv9-cc solaris64-sparcv9-gcc solaris64-x86_64-cc 
+# solaris64-x86_64-gcc tru64-alpha-cc tru64-alpha-gcc uClinux-dist 
+# uClinux-dist64 unixware-2.0 unixware-2.1 unixware-7 unixware-7-gcc vms-alpha 
+# vms-alpha-p32 vms-alpha-p64 vms-ia64 vms-ia64-p32 vms-ia64-p64 vos-gcc 
+# vxworks-mips vxworks-ppc405 vxworks-ppc60x vxworks-ppc750 vxworks-ppc750-debug 
+# vxworks-ppc860 vxworks-ppcgen vxworks-simlinux 
+
+function build_android_ndk() {
+    cd /build
+
+    curl -LO https://dl.google.com/android/repository/android-ndk-r${ANDROID_API}-linux-x86_64.zip
+    unzip android-ndk-r${ANDROID_API}-linux-x86_64.zip
+    export ANDROID_NDK_HOME=/build/android-ndk-r${ANDROID_API}
+    export PATH="/build/android-ndk-r21/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+}
+
+function build_musl_cross() {
+    cd /build
+    
+    # Download
+    git clone https://github.com/richfelker/musl-cross-make.git
+    cd musl-cross-make
+
+    # Build
+    make -j4
+    make install
+    cp -r /build/musl-cross-make/output/* /usr/
+}
+
+function build_ncurses() {
+    cd /build
+
+    # Download
+    curl -LO http://invisible-mirror.net/archives/ncurses/ncurses-${NCURSES_VERSION}.tar.gz
+    tar zxvf ncurses-${NCURSES_VERSION}.tar.gz
+    cd ncurses-${NCURSES_VERSION}
+
+    if [ "$TARGET" == "arm-linux-musleabihf" ]; then
+        # Build
+        CC=$CC CFLAGS='-fPIC' ./configure \
+            --disable-shared \
+            --enable-static \
+            --host=x86_64 \
+            --enable-widec
+    else
+        # Build
+        CC=$CC CFLAGS='-fPIC' ./configure \
+            --disable-shared \
+            --enable-static \
+            --host=x86_64 
+    fi
+}
+
+function build_readline() {
+    cd /build
+
+    # Download
+    curl -LO ftp://ftp.cwru.edu/pub/bash/readline-${READLINE_VERSION}.tar.gz
+    tar xzvf readline-${READLINE_VERSION}.tar.gz
+    cd readline-${READLINE_VERSION}
+
+    # Build
+    CC=$CC CFLAGS='-fPIC' ./configure \
+        --disable-shared \
+        --enable-static \
+        --host=x86_64
+    make -j4
+
+    # Note that socat looks for readline in <readline/readline.h>, so we need
+    # that directory to exist.
+    ln -s /build/readline-${READLINE_VERSION} /build/readline
+}
+
+function build_openssl() {
+    cd /build
+
+    # Download
+    curl -LO https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz
+    tar zxvf openssl-${OPENSSL_VERSION}.tar.gz
+    cd openssl-${OPENSSL_VERSION}
+
+    # Configure
+    if [ "$TARGET" == "x86_64-linux-musl" ]; then
+        CC=$CC ./Configure no-shared no-async linux-x86_64
+    elif [ "$TARGET" == "i486-linux-musl" ]; then
+        CC=$CC ./Configure no-shared no-async -m32 linux-generic32
+    elif [ "$TARGET" == "arm-linux-musleabihf" ]; then
+        CC=$CC GCC_CONFIG="--with-arch=armv7-a --with-fpu=vfpv3-d16" \
+		./Configure no-shared no-async \
+            -D__ANDROID_API__=$ANDROID_API android-armeabi
+    elif [ "$TARGET" == "arm-linux-musleabi" ]; then
+        CC=$CC GCC_CONFIG="--with-float=softfp --with-arch=armv6k --with-fpu=vfpv2" \
+		./Configure no-shared no-async \
+            -D__ANDROID_API__=$ANDROID_API android-armeabi
+    fi
+
+    # Build
+    make -j4
+    echo "** Finished building OpenSSL"
+}
+
+function build_socat() {
+    cd /build
+
+    # Download
+    curl -LO http://www.dest-unreach.org/socat/download/socat-${SOCAT_VERSION}.tar.gz
+    tar xzvf socat-${SOCAT_VERSION}.tar.gz
+    cd socat-${SOCAT_VERSION}
+
+    # Build
+    # NOTE: `NETDB_INTERNAL` is non-POSIX, and thus not defined by MUSL.
+    # We define it this way manually.
+    CC=$CC \
+        CFLAGS='-fPIC' \
+        CPPFLAGS="-I/build -I/build/openssl-${OPENSSL_VERSION}/include -DNETDB_INTERNAL=-1" \
+        LDFLAGS="-L/build/readline-${READLINE_VERSION} -L/build/ncurses-${NCURSES_VERSION}/lib -L/build/openssl-${OPENSSL_VERSION}" \
+        ./configure --host=x86_64
+    make -j4
+    strip socat
+}
+
+function main() {
+
+    build_android_ndk
+    build_musl_cross
+    build_ncurses
+    build_readline
+    build_openssl
+    build_socat
+
+    OUT_DIR="/output/$(echo -n $TARGET | awk -F'-' '{ printf "%s/%s",$2,$1 }')"
+    mkdir -p $OUT_DIR
+    cp /build/socat-${SOCAT_VERSION}/socat $OUT_DIR/
+}
+
+main

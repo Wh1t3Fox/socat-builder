@@ -1,0 +1,4 @@
+#!/bin/bash
+
+docker build . -t socat-builder
+docker run --rm -v "$PWD/output:/binaries" -e TARGET=arm-linux-musleabi socat-builder
